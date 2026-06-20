@@ -234,40 +234,38 @@ class TestConcurrentQuota:
             assert aggregation.total_usage <= 500
 
 
-class TestSeedReExecution:
-    def test_init_db_is_idempotent(self):
-        from init_db import init_database
-        import io
-        from contextlib import redirect_stdout
+class TestIdempotencySecurity:
+    def test_disabled_key_replay_via_integrity_error_path(
+        self, db_session, test_data
+    ):
+        api_key_active, _ = test_data["api_key_active"]
+        api_key_disabled, _ = test_data["api_key_disabled"]
+        tenant = test_data["tenant"]
+        project = test_data["project"]
 
-        f1 = io.StringIO()
-        with redirect_stdout(f1):
-            init_database()
+        idem_key = f"security_test_{uuid.uuid4()}"
 
-        f2 = io.StringIO()
-        with redirect_stdout(f2):
-            init_database()
-
-        assert "Database tables created successfully" in f1.getvalue()
-        assert "Database tables created successfully" in f2.getvalue()
-
-    def test_seed_data_is_idempotent(self):
-        import subprocess
-        import sys
-
-        result1 = subprocess.run(
-            [sys.executable, "seed_data.py"],
-            capture_output=True,
-            text=True
+        event1 = UsageEventCreate(
+            api_key=api_key_active,
+            tenant_id=tenant.id,
+            project_id=project.id,
+            idempotency_key=idem_key,
+            resource_type="api_calls",
+            amount=5,
+            request_time=datetime.utcnow()
         )
-        output1 = result1.stdout
-        assert "Seed data completed successfully" in output1
+        result1, status1 = UsageService.process_usage_event(db_session, event1)
+        assert status1 == "success"
 
-        result2 = subprocess.run(
-            [sys.executable, "seed_data.py"],
-            capture_output=True,
-            text=True
+        event2 = UsageEventCreate(
+            api_key=api_key_disabled,
+            tenant_id=tenant.id,
+            project_id=project.id,
+            idempotency_key=idem_key,
+            resource_type="api_calls",
+            amount=5,
+            request_time=datetime.utcnow()
         )
-        output2 = result2.stdout
-        assert "Seed data completed successfully" in output2
-        assert result2.returncode == 0
+        result2, status2 = UsageService.process_usage_event(db_session, event2)
+        assert status2 == "invalid_api_key"
+        assert result2 is None

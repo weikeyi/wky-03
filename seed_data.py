@@ -6,6 +6,50 @@ import string
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+
+def _sp(s="", end="\n"):
+    try:
+        print(s, end=end)
+    except UnicodeEncodeError:
+        ascii_s = (
+            s.replace("\u2713", "[OK]").replace("\u2717", "[FAIL]")
+             .replace("\u2500", "-").replace("\u2501", "=")
+             .replace("\u2502", "|").replace("\u2503", "#")
+             .replace("\u250c", "+").replace("\u2510", "+")
+             .replace("\u2514", "+").replace("\u2518", "+")
+             .replace("\u251c", "+").replace("\u2524", "+")
+             .replace("\u252c", "+").replace("\u2534", "+")
+             .replace("\u253c", "+")
+        )
+        try:
+            print(ascii_s, end=end)
+        except UnicodeEncodeError:
+            print(
+                s.encode("ascii", errors="replace").decode("ascii"),
+                end=end
+            )
+
+
+def _setup_console_encoding():
+    if sys.platform == "win32":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+            sys.stderr.reconfigure(encoding="utf-8")
+        except Exception:
+            try:
+                import io
+                sys.stdout = io.TextIOWrapper(
+                    sys.stdout.buffer, encoding="utf-8", errors="replace"
+                )
+                sys.stderr = io.TextIOWrapper(
+                    sys.stderr.buffer, encoding="utf-8", errors="replace"
+                )
+            except Exception:
+                pass
+
+
+_setup_console_encoding()
+
 from app.database import SessionLocal, Base, engine
 from app.models import (
     User, Tenant, Project, Plan, PlanQuota, PlanAssignment,
@@ -23,16 +67,17 @@ def generate_api_key() -> str:
 
 
 def init_database():
-    print("Creating database tables...")
+    _sp("Creating database tables...")
     Base.metadata.create_all(bind=engine)
-    print("Database tables created successfully.")
+    _sp("Database tables created successfully.")
+    return True
 
 
 def seed_data():
     db = SessionLocal()
 
     try:
-        print("\n=== Seeding data ===")
+        _sp("\n=== Seeding data ===")
 
         admin_user = db.query(User).filter(User.username == "admin").first()
         if not admin_user:
@@ -44,7 +89,7 @@ def seed_data():
                 is_admin=True
             )
             db.add(admin_user)
-            print("✓ Created admin user (admin/admin123)")
+            _sp("\u2713 Created admin user (admin/admin123)")
 
         tenant1 = db.query(Tenant).filter(Tenant.name == "示例科技有限公司").first()
         if not tenant1:
@@ -57,7 +102,7 @@ def seed_data():
             )
             db.add(tenant1)
             db.flush()
-            print("✓ Created tenant: 示例科技有限公司")
+            _sp("\u2713 Created tenant: 示例科技有限公司")
         else:
             db.flush()
 
@@ -72,7 +117,7 @@ def seed_data():
                 tenant_id=tenant1.id
             )
             db.add(tenant1_user)
-            print("✓ Created tenant admin user (tenant1_admin/tenant123)")
+            _sp("\u2713 Created tenant admin user (tenant1_admin/tenant123)")
 
         project1 = db.query(Project).filter(
             Project.tenant_id == tenant1.id,
@@ -87,7 +132,7 @@ def seed_data():
             )
             db.add(project1)
             db.flush()
-            print("✓ Created project: 智能客服系统")
+            _sp("\u2713 Created project: 智能客服系统")
         else:
             db.flush()
 
@@ -104,7 +149,7 @@ def seed_data():
             )
             db.add(project2)
             db.flush()
-            print("✓ Created project: 数据分析平台")
+            _sp("\u2713 Created project: 数据分析平台")
         else:
             db.flush()
 
@@ -146,7 +191,7 @@ def seed_data():
                 over_limit_price=0.2
             )
             db.add_all([quota1, quota2, quota3])
-            print("✓ Created plan: 标准版套餐 with 3 quotas")
+            _sp("\u2713 Created plan: 标准版套餐 with 3 quotas")
         else:
             db.flush()
 
@@ -188,7 +233,7 @@ def seed_data():
                 over_limit_price=0.1
             )
             db.add_all([quota1, quota2, quota3])
-            print("✓ Created plan: 企业版套餐 with 3 quotas")
+            _sp("\u2713 Created plan: 企业版套餐 with 3 quotas")
         else:
             db.flush()
 
@@ -216,7 +261,7 @@ def seed_data():
                 over_limit_price=0.002
             )
             db.add(quota1)
-            print("✓ Created plan: 日结测试套餐")
+            _sp("\u2713 Created plan: 日结测试套餐")
         else:
             db.flush()
 
@@ -232,7 +277,7 @@ def seed_data():
                 is_active=True
             )
             db.add(assignment1)
-            print("✓ Assigned 标准版套餐 to 智能客服系统")
+            _sp("\u2713 Assigned 标准版套餐 to 智能客服系统")
         else:
             db.flush()
 
@@ -248,7 +293,7 @@ def seed_data():
                 is_active=True
             )
             db.add(assignment2)
-            print("✓ Assigned 企业版套餐 to 数据分析平台")
+            _sp("\u2713 Assigned 企业版套餐 to 数据分析平台")
         else:
             db.flush()
 
@@ -266,7 +311,7 @@ def seed_data():
                 status=APIKeyStatus.ACTIVE
             )
             db.add(api_key1)
-            print(f"✓ Created API Key for 智能客服系统: {raw_key1}")
+            _sp(f"\u2713 Created API Key for 智能客服系统: {raw_key1}")
 
         api_key2 = db.query(APIKey).filter(
             APIKey.project_id == project2.id,
@@ -282,7 +327,7 @@ def seed_data():
                 status=APIKeyStatus.ACTIVE
             )
             db.add(api_key2)
-            print(f"✓ Created API Key for 数据分析平台: {raw_key2}")
+            _sp(f"\u2713 Created API Key for 数据分析平台: {raw_key2}")
 
         api_key3 = db.query(APIKey).filter(
             APIKey.project_id == project1.id,
@@ -298,7 +343,7 @@ def seed_data():
                 status=APIKeyStatus.DISABLED
             )
             db.add(api_key3)
-            print(f"✓ Created disabled API Key: {raw_key3}")
+            _sp(f"\u2713 Created disabled API Key: {raw_key3}")
 
         alert_rule1 = db.query(AlertRule).filter(
             AlertRule.tenant_id == tenant1.id,
@@ -315,7 +360,7 @@ def seed_data():
                 is_active=True
             )
             db.add(alert_rule1)
-            print("✓ Created alert rule: API调用量75%预警")
+            _sp("\u2713 Created alert rule: API调用量75%预警")
 
         alert_rule2 = db.query(AlertRule).filter(
             AlertRule.tenant_id == tenant1.id,
@@ -332,7 +377,7 @@ def seed_data():
                 is_active=True
             )
             db.add(alert_rule2)
-            print("✓ Created alert rule: 存储用量50GB预警")
+            _sp("\u2713 Created alert rule: 存储用量50GB预警")
 
         alert_rule3 = db.query(AlertRule).filter(
             AlertRule.tenant_id == tenant1.id,
@@ -349,16 +394,17 @@ def seed_data():
                 is_active=True
             )
             db.add(alert_rule3)
-            print("✓ Created alert rule: 全资源90%严重告警")
+            _sp("\u2713 Created alert rule: 全资源90%严重告警")
 
         db.commit()
-        print("\n=== Seed data completed successfully! ===")
-        print("\nDemo credentials:")
-        print("  Admin: admin / admin123")
-        print("  Tenant Admin: tenant1_admin / tenant123")
+        _sp("\n=== Seed data completed successfully! ===")
+        _sp("\nDemo credentials:")
+        _sp("  Admin: admin / admin123")
+        _sp("  Tenant Admin: tenant1_admin / tenant123")
+        return True
 
     except Exception as e:
-        print(f"Error seeding data: {e}")
+        _sp(f"Error seeding data: {e}")
         db.rollback()
         raise
     finally:
@@ -366,15 +412,15 @@ def seed_data():
 
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("Multi-tenant API Billing & Quota Service - Data Seeder")
-    print("=" * 60)
+    _sp("=" * 60)
+    _sp("Multi-tenant API Billing & Quota Service - Data Seeder")
+    _sp("=" * 60)
 
     init_database()
     seed_data()
 
-    print("\n" + "=" * 60)
-    print("Seeding completed! You can now run:")
-    print("  python main.py")
-    print("Then visit: http://localhost:8000/docs")
-    print("=" * 60)
+    _sp("\n" + "=" * 60)
+    _sp("Seeding completed! You can now run:")
+    _sp("  python main.py")
+    _sp("Then visit: http://localhost:8000/docs")
+    _sp("=" * 60)
