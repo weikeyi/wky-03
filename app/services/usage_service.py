@@ -306,12 +306,6 @@ class UsageService:
         db: Session,
         event_data: UsageEventCreate
     ) -> Tuple[Optional[UsageEvent], str]:
-        if UsageService._check_duplicate_event(db, event_data.idempotency_key):
-            existing = db.query(UsageEvent).filter(
-                UsageEvent.idempotency_key == event_data.idempotency_key
-            ).first()
-            return existing, "duplicate"
-
         api_key = UsageService._validate_api_key(
             db, event_data.api_key, event_data.tenant_id, event_data.project_id
         )
@@ -334,6 +328,19 @@ class UsageService:
 
         if not tenant:
             return None, "invalid_tenant"
+
+        if UsageService._check_duplicate_event(db, event_data.idempotency_key):
+            existing = db.query(UsageEvent).filter(
+                UsageEvent.idempotency_key == event_data.idempotency_key
+            ).first()
+            if (existing and
+                existing.tenant_id == event_data.tenant_id and
+                existing.project_id == event_data.project_id and
+                existing.api_key_id == api_key.id and
+                api_key.status == APIKeyStatus.ACTIVE):
+                return existing, "duplicate"
+            else:
+                return None, "invalid_api_key"
 
         plan = UsageService._get_active_plan_for_project(
             db, event_data.project_id, event_data.request_time
@@ -425,7 +432,14 @@ class UsageService:
                 existing = db.query(UsageEvent).filter(
                     UsageEvent.idempotency_key == event_data.idempotency_key
                 ).first()
-                return existing, "duplicate"
+                if (existing and
+                    existing.tenant_id == event_data.tenant_id and
+                    existing.project_id == event_data.project_id and
+                    existing.api_key_id == api_key.id and
+                    api_key.status == APIKeyStatus.ACTIVE):
+                    return existing, "duplicate"
+                else:
+                    return None, "invalid_api_key"
             raise
 
     @staticmethod

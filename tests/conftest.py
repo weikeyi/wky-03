@@ -222,6 +222,61 @@ def test_data(db_session):
     )
     db_session.add(api_key3)
 
+    tenant2 = Tenant(
+        name="Test Tenant 2",
+        status=TenantStatus.ACTIVE,
+        contact_email="tenant2@test.com"
+    )
+    db_session.add(tenant2)
+    db_session.flush()
+
+    project_t2 = Project(
+        tenant_id=tenant2.id,
+        name="Tenant 2 Project",
+        description="Project for tenant 2",
+        is_active=True
+    )
+    db_session.add(project_t2)
+    db_session.flush()
+
+    plan_t2 = Plan(
+        tenant_id=tenant2.id,
+        name="Tenant 2 Plan",
+        description="Plan for tenant 2",
+        billing_period=BillingPeriod.MONTHLY,
+        over_limit_action=OverLimitAction.CHARGE,
+        is_active=True
+    )
+    db_session.add(plan_t2)
+    db_session.flush()
+
+    quota_t2 = PlanQuota(
+        plan_id=plan_t2.id,
+        resource_type="api_calls",
+        limit=500,
+        unit_price=0.01,
+        over_limit_price=0.02
+    )
+    db_session.add(quota_t2)
+
+    assignment_t2 = PlanAssignment(
+        plan_id=plan_t2.id,
+        project_id=project_t2.id,
+        effective_from=datetime(2024, 1, 1),
+        is_active=True
+    )
+    db_session.add(assignment_t2)
+
+    raw_key_t2 = generate_api_key()
+    api_key_t2 = APIKey(
+        project_id=project_t2.id,
+        key_hash=hash_api_key(raw_key_t2),
+        key_prefix=raw_key_t2[:10],
+        name="Tenant 2 Active Key",
+        status=APIKeyStatus.ACTIVE
+    )
+    db_session.add(api_key_t2)
+
     db_session.commit()
 
     return {
@@ -235,7 +290,10 @@ def test_data(db_session):
         "plan_daily": plan_daily,
         "api_key_active": (raw_key1, api_key1),
         "api_key_disabled": (raw_key2, api_key2),
-        "api_key_project2": (raw_key3, api_key3)
+        "api_key_project2": (raw_key3, api_key3),
+        "tenant2": tenant2,
+        "project_t2": project_t2,
+        "api_key_t2": (raw_key_t2, api_key_t2)
     }
 
 
