@@ -7,7 +7,8 @@ from app.security import get_current_active_user
 from app.models import User, AlertRule, AlertRecord, AlertSeverity
 from app.schemas import (
     AlertRuleCreate, AlertRuleUpdate, AlertRuleResponse,
-    AlertRecordResponse
+    AlertRecordResponse, AlertAcknowledgeRequest,
+    AlertBatchAcknowledgeRequest, AlertBatchAcknowledgeResponse
 )
 
 router = APIRouter(prefix="/alerts", tags=["告警"])
@@ -188,29 +189,91 @@ async def get_alert_record(
 @router.post("/records/{record_id}/acknowledge", response_model=AlertRecordResponse)
 async def acknowledge_alert(
     record_id: int,
+    ack_data: AlertAcknowledgeRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    record = db.query(AlertRecord).filter(
-        AlertRecord.id == record_id,
-        AlertRecord.is_acknowledged == False
-    ).first()
+    record = db.query(AlertRecord).filter(AlertRecord.id == record_id).first()
 
     if not record:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Alert record not found or already acknowledged"
+            detail="Alert record not found"
         )
 
     if current_user.tenant_id and not current_user.is_admin:
         if current_user.tenant_id != record.tenant_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
+                detail="Access denied: cannot acknowledge alerts from other tenants"
             )
+
+    if record.is_acknowledged:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Alert already acknowledged"
+        )
 
     record.is_acknowledged = True
     record.acknowledged_at = datetime.utcnow()
+    record.acknowledged_by = current_user.id
+    record.acknowledge_note = ack_data.note
     db.commit()
     db.refresh(record)
     return record
+
+
+@router.post("/records/batch-acknowledge", response_model=AlertBatchAcknowledgeResponse)
+async def batch_acknowledge_alerts(
+    ack_data: AlertBatchAcknowledgeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    if not ack_data.record_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No record IDs provided"
+        )
+
+    records = db.query(AlertRecord).filter(
+        AlertRecord.id.in_(ack_data.record_ids)
+    ).all()
+
+    record_map = {r.id: r for r in records}
+    success_count = 0
+    failed_ids = []
+    details = {}
+
+    for record_id in ack_data.record_ids:
+        record = record_map.get(record_id)
+
+        if not record:
+            failed_ids.append(record_id)
+            details[record_id] = "Alert record not found"
+            continue
+
+        if current_user.tenant_id and not current_user.is_admin:
+            if current_user.tenant_id != record.tenant_id:
+                failed_ids.append(record_id)
+                details[record_id] = "Access denied: cannot acknowledge alerts from other tenants"
+                continue
+
+        if record.is_acknowledged:
+            failed_ids.append(record_id)
+            details[record_id] = "Alert already acknowledged"
+            continue
+
+        record.is_acknowledged = True
+        record.acknowledged_at = datetime.utcnow()
+        record.acknowledged_by = current_user.id
+        record.acknowledge_note = ack_data.note
+        success_count += 1
+
+    db.commit()
+
+    return AlertBatchAcknowledgeResponse(
+        success_count=success_count,
+        failed_count=len(failed_ids),
+        failed_ids=failed_ids,
+        details=details
+    )

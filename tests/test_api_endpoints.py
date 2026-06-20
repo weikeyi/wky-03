@@ -477,6 +477,7 @@ class TestAlertAPI:
             alert_id = alerts[0]["id"]
             ack_response = client.post(
                 f"/api/v1/alerts/records/{alert_id}/acknowledge",
+                json={},
                 headers={"Authorization": f"Bearer {token}"}
             )
             assert ack_response.status_code == 200

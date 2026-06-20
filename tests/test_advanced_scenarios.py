@@ -8,7 +8,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from app.models import UsageAggregation, BillingCycle, APIKeyStatus
+from app.models import UsageAggregation, BillingCycle, APIKeyStatus, AlertRecord, AlertSeverity
 from app.schemas import UsageEventCreate
 from app.services.usage_service import UsageService
 
@@ -463,6 +463,342 @@ class TestUsageEventExport:
         assert response.status_code == 200
         lines = response.text.strip().split("\n")
         assert len(lines) == 3
+
+
+class TestAlertAcknowledgment:
+
+    def _create_alert_records(self, db_session, tenant_id, project_id, count=3, ack=False):
+        records = []
+        for i in range(count):
+            record = AlertRecord(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                resource_type="api_calls",
+                threshold=80.0,
+                current_usage=85.0 + i * 5,
+                percentage=85.0 + i * 5,
+                severity=AlertSeverity.WARNING if i < 2 else AlertSeverity.CRITICAL,
+                message=f"Test alert {i + 1}: usage exceeded threshold",
+                is_acknowledged=ack,
+                acknowledged_at=datetime.utcnow() if ack else None,
+                acknowledged_by=None,
+                acknowledge_note=None
+            )
+            db_session.add(record)
+            records.append(record)
+        db_session.commit()
+        for r in records:
+            db_session.refresh(r)
+        return records
+
+    def test_get_unhandled_alerts_list(self, db_session, client, test_data):
+        tenant = test_data["tenant"]
+        project = test_data["project"]
+        token = get_auth_token(client, "tenant_admin", "test123")
+
+        self._create_alert_records(db_session, tenant.id, project.id, count=3, ack=False)
+        self._create_alert_records(db_session, tenant.id, project.id, count=2, ack=True)
+
+        response = client.get(
+            "/api/v1/alerts/records",
+            params={"is_acknowledged": False},
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 3
+        for record in data:
+            assert record["is_acknowledged"] is False
+            assert record["acknowledged_at"] is None
+            assert record["acknowledged_by"] is None
+            assert record["acknowledge_note"] is None
+
+    def test_single_acknowledge_with_note(self, db_session, client, test_data):
+        tenant = test_data["tenant"]
+        project = test_data["project"]
+        tenant_admin = test_data["tenant_admin"]
+        token = get_auth_token(client, "tenant_admin", "test123")
+
+        records = self._create_alert_records(db_session, tenant.id, project.id, count=1, ack=False)
+        alert_id = records[0].id
+        test_note = "已通知相关负责人处理，预计2小时内恢复"
+
+        response = client.post(
+            f"/api/v1/alerts/records/{alert_id}/acknowledge",
+            json={"note": test_note},
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["is_acknowledged"] is True
+        assert data["acknowledged_at"] is not None
+        assert data["acknowledged_by"] == tenant_admin.id
+        assert data["acknowledge_note"] == test_note
+
+        db_record = db_session.query(AlertRecord).filter(AlertRecord.id == alert_id).first()
+        assert db_record.is_acknowledged is True
+        assert db_record.acknowledged_by == tenant_admin.id
+        assert db_record.acknowledge_note == test_note
+        assert db_record.acknowledged_at is not None
+
+    def test_single_acknowledge_without_note(self, db_session, client, test_data):
+        tenant = test_data["tenant"]
+        project = test_data["project"]
+        tenant_admin = test_data["tenant_admin"]
+        token = get_auth_token(client, "tenant_admin", "test123")
+
+        records = self._create_alert_records(db_session, tenant.id, project.id, count=1, ack=False)
+        alert_id = records[0].id
+
+        response = client.post(
+            f"/api/v1/alerts/records/{alert_id}/acknowledge",
+            json={},
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["is_acknowledged"] is True
+        assert data["acknowledged_by"] == tenant_admin.id
+        assert data["acknowledge_note"] is None
+
+    def test_batch_acknowledge_success(self, db_session, client, test_data):
+        tenant = test_data["tenant"]
+        project = test_data["project"]
+        tenant_admin = test_data["tenant_admin"]
+        token = get_auth_token(client, "tenant_admin", "test123")
+
+        records = self._create_alert_records(db_session, tenant.id, project.id, count=3, ack=False)
+        record_ids = [r.id for r in records]
+        test_note = "批量确认：已安排运维团队处理"
+
+        response = client.post(
+            "/api/v1/alerts/records/batch-acknowledge",
+            json={
+                "record_ids": record_ids,
+                "note": test_note
+            },
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success_count"] == 3
+        assert data["failed_count"] == 0
+        assert data["failed_ids"] == []
+
+        for record_id in record_ids:
+            db_record = db_session.query(AlertRecord).filter(AlertRecord.id == record_id).first()
+            assert db_record.is_acknowledged is True
+            assert db_record.acknowledged_by == tenant_admin.id
+            assert db_record.acknowledge_note == test_note
+            assert db_record.acknowledged_at is not None
+
+    def test_batch_acknowledge_partial_failure(self, db_session, client, test_data):
+        tenant = test_data["tenant"]
+        project = test_data["project"]
+        token = get_auth_token(client, "tenant_admin", "test123")
+
+        unacked_records = self._create_alert_records(db_session, tenant.id, project.id, count=2, ack=False)
+        acked_records = self._create_alert_records(db_session, tenant.id, project.id, count=1, ack=True)
+
+        all_ids = [r.id for r in unacked_records] + [r.id for r in acked_records] + [99999]
+
+        response = client.post(
+            "/api/v1/alerts/records/batch-acknowledge",
+            json={
+                "record_ids": all_ids,
+                "note": "批量处理"
+            },
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success_count"] == 2
+        assert data["failed_count"] == 2
+        assert len(data["failed_ids"]) == 2
+        assert 99999 in data["failed_ids"]
+        assert data["details"]["99999"] == "Alert record not found"
+
+        for acked_id in [r.id for r in acked_records]:
+            assert acked_id in data["failed_ids"]
+            assert data["details"][str(acked_id)] == "Alert already acknowledged"
+
+    def test_cross_tenant_acknowledge_denied(self, db_session, client, test_data):
+        tenant1 = test_data["tenant"]
+        project1 = test_data["project"]
+        tenant2 = test_data["tenant2"]
+        project_t2 = test_data["project_t2"]
+
+        t1_token = get_auth_token(client, "tenant_admin", "test123")
+
+        t2_records = self._create_alert_records(db_session, tenant2.id, project_t2.id, count=2, ack=False)
+        t2_alert_id = t2_records[0].id
+
+        response = client.post(
+            f"/api/v1/alerts/records/{t2_alert_id}/acknowledge",
+            json={"note": "越权测试"},
+            headers={"Authorization": f"Bearer {t1_token}"}
+        )
+
+        assert response.status_code == 403
+        assert "other tenants" in response.json()["detail"].lower() or "Access denied" in response.json()["detail"]
+
+        db_record = db_session.query(AlertRecord).filter(AlertRecord.id == t2_alert_id).first()
+        assert db_record.is_acknowledged is False
+
+    def test_cross_tenant_batch_acknowledge_denied(self, db_session, client, test_data):
+        tenant1 = test_data["tenant"]
+        project1 = test_data["project"]
+        tenant2 = test_data["tenant2"]
+        project_t2 = test_data["project_t2"]
+
+        t1_token = get_auth_token(client, "tenant_admin", "test123")
+
+        t1_records = self._create_alert_records(db_session, tenant1.id, project1.id, count=2, ack=False)
+        t2_records = self._create_alert_records(db_session, tenant2.id, project_t2.id, count=2, ack=False)
+
+        all_ids = [r.id for r in t1_records] + [r.id for r in t2_records]
+
+        response = client.post(
+            "/api/v1/alerts/records/batch-acknowledge",
+            json={
+                "record_ids": all_ids,
+                "note": "批量测试"
+            },
+            headers={"Authorization": f"Bearer {t1_token}"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success_count"] == 2
+        assert data["failed_count"] == 2
+
+        for t2_id in [r.id for r in t2_records]:
+            assert t2_id in data["failed_ids"]
+            assert "other tenants" in data["details"][str(t2_id)].lower() or "Access denied" in data["details"][str(t2_id)]
+
+        for t2_id in [r.id for r in t2_records]:
+            db_record = db_session.query(AlertRecord).filter(AlertRecord.id == t2_id).first()
+            assert db_record.is_acknowledged is False
+
+    def test_duplicate_acknowledge_returns_error(self, db_session, client, test_data):
+        tenant = test_data["tenant"]
+        project = test_data["project"]
+        token = get_auth_token(client, "tenant_admin", "test123")
+
+        records = self._create_alert_records(db_session, tenant.id, project.id, count=1, ack=False)
+        alert_id = records[0].id
+
+        first_response = client.post(
+            f"/api/v1/alerts/records/{alert_id}/acknowledge",
+            json={"note": "第一次确认"},
+            headers={"Authorization": f"Bearer {token}"}
+        )
+        assert first_response.status_code == 200
+
+        second_response = client.post(
+            f"/api/v1/alerts/records/{alert_id}/acknowledge",
+            json={"note": "重复确认"},
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert second_response.status_code == 400
+        assert "already acknowledged" in second_response.json()["detail"].lower()
+
+        db_record = db_session.query(AlertRecord).filter(AlertRecord.id == alert_id).first()
+        assert db_record.acknowledge_note == "第一次确认"
+
+    def test_acknowledge_note_persisted_in_db(self, db_session, client, test_data):
+        tenant = test_data["tenant"]
+        project = test_data["project"]
+        tenant_admin = test_data["tenant_admin"]
+        token = get_auth_token(client, "tenant_admin", "test123")
+
+        records = self._create_alert_records(db_session, tenant.id, project.id, count=1, ack=False)
+        alert_id = records[0].id
+        test_note = "备注内容测试：这是一条很长的备注，包含中文、English 和数字 12345，以及特殊字符 !@#$%^&*()"
+
+        response = client.post(
+            f"/api/v1/alerts/records/{alert_id}/acknowledge",
+            json={"note": test_note},
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 200
+
+        db_record = db_session.query(AlertRecord).filter(AlertRecord.id == alert_id).first()
+        assert db_record.acknowledge_note == test_note
+        assert db_record.acknowledged_by == tenant_admin.id
+        assert db_record.acknowledged_at is not None
+
+        detail_response = client.get(
+            f"/api/v1/alerts/records/{alert_id}",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+        assert detail_response.status_code == 200
+        detail_data = detail_response.json()
+        assert detail_data["acknowledge_note"] == test_note
+        assert detail_data["acknowledged_by"] == tenant_admin.id
+
+    def test_admin_can_acknowledge_any_tenant_alert(self, db_session, client, test_data):
+        tenant2 = test_data["tenant2"]
+        project_t2 = test_data["project_t2"]
+        admin = test_data["admin"]
+        admin_token = get_auth_token(client, "test_admin", "test123")
+
+        records = self._create_alert_records(db_session, tenant2.id, project_t2.id, count=1, ack=False)
+        alert_id = records[0].id
+
+        response = client.post(
+            f"/api/v1/alerts/records/{alert_id}/acknowledge",
+            json={"note": "管理员确认"},
+            headers={"Authorization": f"Bearer {admin_token}"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["is_acknowledged"] is True
+        assert data["acknowledged_by"] == admin.id
+        assert data["acknowledge_note"] == "管理员确认"
+
+    def test_empty_batch_acknowledge_returns_error(self, db_session, client, test_data):
+        token = get_auth_token(client, "tenant_admin", "test123")
+
+        response = client.post(
+            "/api/v1/alerts/records/batch-acknowledge",
+            json={"record_ids": []},
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 400
+        assert "No record IDs provided" in response.json()["detail"]
+
+    def test_tenant_admin_sees_only_own_tenant_alerts(self, db_session, client, test_data):
+        tenant1 = test_data["tenant"]
+        project1 = test_data["project"]
+        tenant2 = test_data["tenant2"]
+        project_t2 = test_data["project_t2"]
+
+        t1_token = get_auth_token(client, "tenant_admin", "test123")
+
+        self._create_alert_records(db_session, tenant1.id, project1.id, count=3, ack=False)
+        self._create_alert_records(db_session, tenant2.id, project_t2.id, count=2, ack=False)
+
+        response = client.get(
+            "/api/v1/alerts/records",
+            params={"is_acknowledged": False},
+            headers={"Authorization": f"Bearer {t1_token}"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 3
+        for record in data:
+            assert record["tenant_id"] == tenant1.id
 
 
 def get_auth_token(client, username, password):

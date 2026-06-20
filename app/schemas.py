@@ -301,9 +301,27 @@ class AlertRecordResponse(BaseModel):
     message: str
     is_acknowledged: bool
     acknowledged_at: Optional[datetime]
+    acknowledged_by: Optional[int]
+    acknowledge_note: Optional[str]
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class AlertAcknowledgeRequest(BaseModel):
+    note: Optional[str] = Field(None, max_length=1000, description="确认备注")
+
+
+class AlertBatchAcknowledgeRequest(BaseModel):
+    record_ids: List[int] = Field(..., description="告警记录ID列表")
+    note: Optional[str] = Field(None, max_length=1000, description="确认备注")
+
+
+class AlertBatchAcknowledgeResponse(BaseModel):
+    success_count: int
+    failed_count: int
+    failed_ids: List[int]
+    details: Optional[Dict[int, str]] = None
 
 
 class QuotaCheckResponse(BaseModel):

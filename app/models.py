@@ -264,8 +264,11 @@ class AlertRecord(Base):
     message = Column(Text, nullable=False)
     is_acknowledged = Column(Boolean, default=False)
     acknowledged_at = Column(DateTime(timezone=True), nullable=True)
+    acknowledged_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    acknowledge_note = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     tenant = relationship("Tenant", back_populates="alert_records")
     alert_rule = relationship("AlertRule")
     project = relationship("Project")
+    acknowledged_by_user = relationship("User", foreign_keys=[acknowledged_by])

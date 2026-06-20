@@ -277,6 +277,16 @@ def test_data(db_session):
     )
     db_session.add(api_key_t2)
 
+    tenant2_admin = User(
+        username="tenant2_admin",
+        email="tenant2@test.com",
+        hashed_password=get_password_hash("test123"),
+        is_active=True,
+        is_admin=False,
+        tenant_id=tenant2.id
+    )
+    db_session.add(tenant2_admin)
+
     db_session.commit()
 
     return {
@@ -292,6 +302,7 @@ def test_data(db_session):
         "api_key_disabled": (raw_key2, api_key2),
         "api_key_project2": (raw_key3, api_key3),
         "tenant2": tenant2,
+        "tenant2_admin": tenant2_admin,
         "project_t2": project_t2,
         "api_key_t2": (raw_key_t2, api_key_t2)
     }
