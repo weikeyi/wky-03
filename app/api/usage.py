@@ -1,6 +1,9 @@
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+from io import StringIO
+import csv
 from fastapi import APIRouter, Depends, HTTPException, status, Header
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.security import get_current_active_user
@@ -12,6 +15,9 @@ from app.schemas import (
 from app.services.usage_service import UsageService
 
 router = APIRouter(prefix="/usage", tags=["用量上报"])
+
+MAX_EXPORT_LIMIT = 10000
+DEFAULT_EXPORT_LIMIT = 5000
 
 
 @router.post("/report", response_model=UsageEventResponse, status_code=status.HTTP_201_CREATED)
@@ -155,3 +161,80 @@ async def get_event_history(
         "offset": offset,
         "events": events
     }
+
+
+@router.get("/export")
+async def export_usage_events(
+    tenant_id: Optional[int] = None,
+    project_id: Optional[int] = None,
+    resource_type: Optional[str] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    limit: int = DEFAULT_EXPORT_LIMIT,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    if not current_user.is_admin:
+        if tenant_id is not None and tenant_id != current_user.tenant_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied"
+            )
+        if current_user.tenant_id:
+            tenant_id = current_user.tenant_id
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="tenant_id is required"
+            )
+    elif not tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="tenant_id is required"
+        )
+
+    if limit <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="limit must be positive"
+        )
+
+    if limit > MAX_EXPORT_LIMIT:
+        limit = MAX_EXPORT_LIMIT
+
+    events = UsageService.export_events(
+        db, tenant_id, project_id, resource_type,
+        start_time, end_time, limit
+    )
+
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow([
+        "event_id", "project_id", "api_key_prefix", "resource_type",
+        "amount", "request_time", "unit_price", "idempotency_key"
+    ])
+
+    for event in events:
+        writer.writerow([
+            event["event_id"],
+            event["project_id"],
+            event["api_key_prefix"],
+            event["resource_type"],
+            event["amount"],
+            event["request_time"].isoformat() if event["request_time"] else "",
+            event["unit_price"],
+            event["idempotency_key"]
+        ])
+
+    buffer.seek(0)
+
+    filename = f"usage_events_tenant_{tenant_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}",
+            "X-Total-Count": str(len(events))
+        }
+    )

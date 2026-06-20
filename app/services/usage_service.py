@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, func
 from sqlalchemy.exc import IntegrityError
@@ -541,3 +541,57 @@ class UsageService:
             .offset(offset).limit(limit).all()
 
         return events, total
+
+    @staticmethod
+    def export_events(
+        db: Session,
+        tenant_id: int,
+        project_id: Optional[int] = None,
+        resource_type: Optional[str] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        limit: int = 10000
+    ) -> List[Dict[str, Any]]:
+        query = db.query(
+            UsageEvent.id,
+            UsageEvent.project_id,
+            APIKey.key_prefix,
+            UsageEvent.resource_type,
+            UsageEvent.amount,
+            UsageEvent.request_time,
+            UsageEvent.unit_price,
+            UsageEvent.idempotency_key
+        ).join(
+            APIKey, UsageEvent.api_key_id == APIKey.id
+        ).filter(
+            UsageEvent.tenant_id == tenant_id
+        )
+
+        if project_id:
+            query = query.filter(UsageEvent.project_id == project_id)
+
+        if resource_type:
+            query = query.filter(UsageEvent.resource_type == resource_type)
+
+        if start_time:
+            query = query.filter(UsageEvent.request_time >= start_time)
+
+        if end_time:
+            query = query.filter(UsageEvent.request_time <= end_time)
+
+        events = query.order_by(UsageEvent.request_time.desc())\
+            .limit(limit).all()
+
+        return [
+            {
+                "event_id": event.id,
+                "project_id": event.project_id,
+                "api_key_prefix": event.key_prefix,
+                "resource_type": event.resource_type,
+                "amount": event.amount,
+                "request_time": event.request_time,
+                "unit_price": event.unit_price,
+                "idempotency_key": event.idempotency_key
+            }
+            for event in events
+        ]

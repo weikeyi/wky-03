@@ -269,3 +269,205 @@ class TestIdempotencySecurity:
         result2, status2 = UsageService.process_usage_event(db_session, event2)
         assert status2 == "invalid_api_key"
         assert result2 is None
+
+
+class TestUsageEventExport:
+    def _create_usage_events(self, db_session, test_data):
+        api_key, _ = test_data["api_key_active"]
+        tenant = test_data["tenant"]
+        project = test_data["project"]
+        project2 = test_data["project2"]
+        api_key3, _ = test_data["api_key_project2"]
+
+        events_data = [
+            (api_key, project.id, "api_calls", 100, datetime(2024, 6, 1, 10, 0, 0)),
+            (api_key, project.id, "api_calls", 200, datetime(2024, 6, 2, 10, 0, 0)),
+            (api_key, project.id, "storage_gb", 5, datetime(2024, 6, 3, 10, 0, 0)),
+            (api_key3, project2.id, "api_calls", 150, datetime(2024, 6, 4, 10, 0, 0)),
+        ]
+
+        for i, (key, proj_id, res_type, amount, req_time) in enumerate(events_data):
+            event = UsageEventCreate(
+                api_key=key,
+                tenant_id=tenant.id,
+                project_id=proj_id,
+                idempotency_key=f"export_test_{uuid.uuid4()}_{i}",
+                resource_type=res_type,
+                amount=amount,
+                request_time=req_time
+            )
+            UsageService.process_usage_event(db_session, event)
+
+    def test_normal_export_csv(self, db_session, client, test_data):
+        self._create_usage_events(db_session, test_data)
+        token = get_auth_token(client, "tenant_admin", "test123")
+
+        response = client.get(
+            "/api/v1/usage/export",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 200
+        assert response.headers["Content-Type"].startswith("text/csv")
+        assert "attachment; filename=usage_events_tenant_" in response.headers["Content-Disposition"]
+        assert "X-Total-Count" in response.headers
+
+        content = response.text
+        lines = content.strip().split("\n")
+        assert len(lines) == 5
+        header = lines[0]
+        assert "event_id" in header
+        assert "project_id" in header
+        assert "api_key_prefix" in header
+        assert "resource_type" in header
+        assert "amount" in header
+        assert "request_time" in header
+        assert "unit_price" in header
+        assert "idempotency_key" in header
+
+    def test_cross_tenant_export_denied(self, db_session, client, test_data):
+        self._create_usage_events(db_session, test_data)
+        token = get_auth_token(client, "tenant_admin", "test123")
+        tenant2 = test_data["tenant2"]
+
+        response = client.get(
+            f"/api/v1/usage/export?tenant_id={tenant2.id}",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 403
+
+    def test_admin_can_export_any_tenant(self, db_session, client, test_data):
+        self._create_usage_events(db_session, test_data)
+        token = get_auth_token(client, "test_admin", "test123")
+        tenant = test_data["tenant"]
+
+        response = client.get(
+            f"/api/v1/usage/export?tenant_id={tenant.id}",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n")
+        assert len(lines) == 5
+
+    def test_filter_by_project(self, db_session, client, test_data):
+        self._create_usage_events(db_session, test_data)
+        token = get_auth_token(client, "tenant_admin", "test123")
+        project = test_data["project"]
+
+        response = client.get(
+            f"/api/v1/usage/export?project_id={project.id}",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n")
+        assert len(lines) == 4
+
+    def test_filter_by_resource_type(self, db_session, client, test_data):
+        self._create_usage_events(db_session, test_data)
+        token = get_auth_token(client, "tenant_admin", "test123")
+
+        response = client.get(
+            "/api/v1/usage/export?resource_type=storage_gb",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n")
+        assert len(lines) == 2
+
+    def test_filter_by_time_range(self, db_session, client, test_data):
+        self._create_usage_events(db_session, test_data)
+        token = get_auth_token(client, "tenant_admin", "test123")
+
+        response = client.get(
+            "/api/v1/usage/export?start_time=2024-06-02T00:00:00&end_time=2024-06-03T23:59:59",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n")
+        assert len(lines) == 3
+
+    def test_empty_result_export(self, db_session, client, test_data):
+        token = get_auth_token(client, "tenant_admin", "test123")
+
+        response = client.get(
+            "/api/v1/usage/export",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 200
+        assert response.headers["X-Total-Count"] == "0"
+        content = response.text
+        lines = content.strip().split("\n")
+        assert len(lines) == 1
+        assert "event_id" in lines[0]
+
+    def test_export_limit_capped_at_max(self, db_session, client, test_data):
+        token = get_auth_token(client, "tenant_admin", "test123")
+
+        response = client.get(
+            "/api/v1/usage/export?limit=100000",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 200
+
+    def test_export_negative_limit_rejected(self, db_session, client, test_data):
+        token = get_auth_token(client, "tenant_admin", "test123")
+
+        response = client.get(
+            "/api/v1/usage/export?limit=-1",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 400
+
+    def test_export_zero_limit_rejected(self, db_session, client, test_data):
+        token = get_auth_token(client, "tenant_admin", "test123")
+
+        response = client.get(
+            "/api/v1/usage/export?limit=0",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 400
+
+    def test_export_limit_applied(self, db_session, client, test_data):
+        self._create_usage_events(db_session, test_data)
+        token = get_auth_token(client, "tenant_admin", "test123")
+
+        response = client.get(
+            "/api/v1/usage/export?limit=2",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 200
+        assert int(response.headers["X-Total-Count"]) == 2
+        lines = response.text.strip().split("\n")
+        assert len(lines) == 3
+
+    def test_combined_filters(self, db_session, client, test_data):
+        self._create_usage_events(db_session, test_data)
+        token = get_auth_token(client, "tenant_admin", "test123")
+        project = test_data["project"]
+
+        response = client.get(
+            f"/api/v1/usage/export?project_id={project.id}&resource_type=api_calls&start_time=2024-06-01T00:00:00&end_time=2024-06-02T23:59:59",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 200
+        lines = response.text.strip().split("\n")
+        assert len(lines) == 3
+
+
+def get_auth_token(client, username, password):
+    response = client.post(
+        "/api/v1/auth/login",
+        data={"username": username, "password": password}
+    )
+    return response.json()["access_token"]
